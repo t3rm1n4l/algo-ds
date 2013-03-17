@@ -86,6 +86,10 @@ void print_queue(queue<int> &q) {
     cout<<"Queue: ";
     while (!q.isEmpty()) {
         q.dequeue(x);
+        if (x == INT_MAX) {
+            cout<<endl;
+            continue;
+        }
         cout<<x<<" ";
     }
     cout<<endl;
