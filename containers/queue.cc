@@ -39,8 +39,7 @@ public:
         if (isEmpty()) return false;
         x = store[j];
         size--;
-        j++;
-        j = (j+N)%N;
+        j = (j+1)%N;
     }
 
 };
