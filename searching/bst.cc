@@ -122,7 +122,7 @@ private:
             if (root->key > key) {
                 root->left = _del(root->left, key);
             } else if (root->key < key) {
-                root->left = _del(root->right, key);
+                root->right = _del(root->right, key);
             } else {
                 if (root->left == NULL) return root->right;
                 if (root->right == NULL) return root->left;
