@@ -1,0 +1,188 @@
+/*
+DESIGN:
+Assumptions:
+ 1. rename_atomic is available
+ 2. time is synchronized correctly across all producers
+
+
+Producer operation:
+For a base path, FS/queues/, each producer can create a namespace.
+Eg. FS/queues/queue-RANDID
+
+In each producer's namespace it will create an hour directory as follows:
+FS/queues/queue-RANDID/2013-01-13-01
+
+For each item to be placed by the producer, it will name it as current epochtime or epochtime-seq_id (incase if we write multiple files within a second)
+
+For performing the upload, the file will be uploaded as FS/queues/queue-RANDID/2013-01-13-01/epoch_TMP. On success of upload, it performs an atomic rename to FS/queues/queue-RANDID/2013-01-13-01/epoch.
+
+Consumer operation:
+The consumer is lazily initialized when dequeue operation is called. In order to prevent dequeue operation from block waiting for long time to fetch the file lists, timestamp based subdirectories are used. File list is fetched lazily by keeping a buffer size.
+Consumer lists the namespace directories by listing FS/queues/. For each producer namespace list the directories and get all the hour directories. It fetches the file list from most old n hours (BUFFER_HOURS) and keeps the filepath list so that following many operations can makes use of this file list for file downloads. File list is stored by epoch name so that relative order within each producer namespace is preserved and provides a faire order among multiple producer files. Once a dequeue operation downloads a file, it deletes that file from the namespace. If all the files for buffered hours are downloaded and dequeued, the timestamp subdirectory is deleted by considering if the directory is for current hours.
+
+*/
+
+const (
+    FORMAT = "yyyy-mm-dd-hh"
+    ERR_SUCCESS = 0
+    ERR_NOTFOUND = 1
+    ERR_QUEUE_EMPTY = 2
+    BUFFER_HOURS = 5
+    TIMEOUT = x
+}
+
+
+// Storage interface API
+class Storage {
+    self.timeout = TIMEOUT // max time for file upload
+
+    int initialize(params);
+    int put(uri, file_path);
+    int rename_atomic(uri_src, uri_dest);
+    int get(uri_src, dst_path);
+    int, string[] list(uri);
+    int mkdir(uri);
+    int delete(uri);
+};
+
+class FileQueue {
+
+    // Public interfaces
+    int Open(queue_path, storage) {
+        self.storage = storage
+        self.base_path = queue_path
+        self.read_bufqueue = ([],[],[]) // contains (datedir_paths, filepaths, datedir_path_being_processed)
+    }
+
+    int Enqueue(src_fpath) {
+        path = get_putpath();
+        temp_path = path + "__TMP"
+        status = self.storage.put(temp_path, src_fpath)
+        // If base directory is not already found create it
+        if (status == ERR_NOTFOUND) {
+            err = init_path(basedir(temp_path))
+            if (err != ERR_SUCCESS) {
+                return err
+            }
+            // upload the file with a tmp name
+            status = self.storage.put(temp_path, src_fpath)
+        }
+
+        if (status == ERR_SUCCESS) {
+            // perform atomic rename to correct filename
+            return self.storage.rename_atomic(temp_path, path)
+        }
+
+        return status
+    }
+
+    int Dequeue(dst_fpath) {
+        // if both hour_paths and file_paths are empty fill more and buffer
+        if (self.read_bufqueue[0] == [] and self.read_bufqueue[1] == []) {
+            // list all producer namespaces
+            status, namespaces = self.storage.list(self.base_path)
+            if (status != ERR_SUCCESS) {
+                return status
+            }
+
+            tmp_list = [] // use a temp to not loose data incase of failure
+            // get hour paths for all namespaces
+            for nsp in namespaces {
+                status, hour_paths = self.storage.list(nsp)
+                if (status != ERR_SUCCESS) {
+                    return status
+                }
+
+                tmp_list.extend(hour_paths)
+            }
+
+            self.read_bufqueue[0].extend(tmp_list)
+
+            // sorted by datestamp
+            self.read_bufqueue[0] = sort(self.read_bufqueue[0])
+        }
+
+        // if filepath list is empty, i need to repopulate
+        if (self.read_bufqueue[1] == []) {
+            processed_hours = self.read_bufqueue[2]
+
+            // if filepath list is empty, that means i have already processed some files from all hour directories.
+            // I can delete the hour directory if they are old and already processed
+            for ph in processed_hours {
+                if (time.Diff(now, ph) > HOUR_SEC + TIMEOUT) {
+                    status = self.storage.delete(ph)
+                    if (status != ERR_SUCCESS) {
+                        return status
+                    }
+                }
+
+                //TODO: try to clean up namespace directory as well
+            }
+
+            // lets fill more files to filelist
+            buf_count = BUFFER_HOURS
+            // get same hour directories from all namespaces
+            while (len(self.read_bufqueue[0]) > buf_count &&
+                basename(self.read_bufqueue[0][buf_count-1]) == basename(self.read_bufqueue[0][buf_count])) {
+                buf_count++
+            }
+
+            buf_hours = self.read_bufqueue[0][:buf_count]
+            tmp_files = []
+            for bh in buf_hours {
+                status, files = self.storage.list(bh)
+                if (status != ERR_SUCCESS) {
+                    return status
+                }
+                // filter out files ending with __TMP since they are files being created or failed uploads
+                files = filter(files, "__TMP")
+                tmp_files.extend(files)
+            }
+
+            // Put hours for which files list have been fetched to under_processing queue
+            self.read_bufqueue[2] = buf_hours
+            self.read_bufqueue[1].extend(tmp_files)
+            // Sort filelists (sorted based on epoch)
+            self.read_bufqueue[1] = sort(self.read_bufqueue[1])
+
+            self.read_bufqueue[0] = self.read_bufqueue[0][buf_count:]
+        }
+
+        if (len(read_bufqueue[1] > 0) {
+            fileuri = self.read_bufqueue[1][0]
+            status = self.storage.get(fileuri, dst_fpath)
+            if (status != ERR_SUCCESS) {
+                return status
+            }
+
+            status = self.storage.delete(fileuri)
+            if (status == ERR_SUCCESS) {
+                delete(self.read_bufqueue[1][0])
+                return ERR_SUCCESS
+            }
+
+            remove(dst_filepath)
+
+            return status
+        }
+
+        return ERR_QUEUE_EMPTY
+    }
+
+    // Internal methods
+    int init_path(path) {
+        if (self.namespace == None) {
+            self.namespace = genId()
+        }
+
+        status = self.storage.mkdir(path)
+        return status
+    }
+
+    string get_putpath() {
+        return join(self.base_path, "/", self.namespace, "/", time.Format(FORMAT), "/", time.Epoch())
+    }
+
+    string genId(); // generate a random identifier for producer
+
+};
